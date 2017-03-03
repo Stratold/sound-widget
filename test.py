@@ -20,6 +20,18 @@ class AwesomeTalker(dbus.service.Object):
         self.awful = dbus.Interface(aw, 'org.awesomewm.awful.sototools.Tools')
         self._conn = conn
         self._sig_recvs = []
+        class sig_funcs(metaclass=TMeta):
+            def pawMouseEnter(*args, **kwgs):
+                print(f"sig_funcs(pawMouseEnter): {args} {kwgs}")
+            def pawMouseLeave(*args, **kwgs):
+                print(f"sig_funcs(pawMouseLeave): {args} {kwgs}")
+            def pawMouseWheelUp(*args, **kwgs):
+                print(f"sig_funcs(pawMouseWheelUp): {args} {kwgs}")
+                self._paw.sig_functions['set_fsink_vol_up'](*args, **kwgs)
+            def pawMouseWheelDown(*args, **kwgs):
+                print(f"sig_funcs(pawMouseWheelDown): {args} {kwgs}")
+                self._paw.sig_functions['set_fsink_vol_down'](*args, **kwgs)
+        self.sig_funcs = sig_funcs
 
         print("initialized")
 
@@ -27,13 +39,9 @@ class AwesomeTalker(dbus.service.Object):
         match = self._conn.add_signal_receiver(handler, sig_name, dbus_iface)
         self._sig_recvs.append(match)
 
-    class sig_funcs(metaclass=TMeta):
-        def pawMouseEnter(*args, **kwgs):
-            print(f"sig_funcs(pawMouseEnter): {args} {kwgs}")
-        def pawMouseLeave(*args, **kwgs):
-            print(f"sig_funcs(pawMouseLeave): {args} {kwgs}")
 
-    def init_paw(self):
+    def init_paw(self, paw_obj):
+        self._paw = paw_obj
         for k, f in self.sig_funcs.items():
             self.add_sig_recv(f, k)
 
@@ -59,7 +67,7 @@ class PulseTalker(dbus.service.Object):
         self._sig_handlers = {}
         self._pa_state = {
                 'pa_signals': {},
-                'pa_fb_sink': None,
+                'fb_sink_vol': None,
                 }
         self._conn = pbus
         self._pa_core = pbus.get_object('org.PulseAudio.Core1', '/org/pulseaudio/core1')
@@ -70,12 +78,33 @@ class PulseTalker(dbus.service.Object):
                 print(f'Error handler invoked: {args} {kwgs}')
             def fsink_vol_update(*args):
                 self._awesome.set_default_vol(max(args[0]))
+                self._pa_state['fb_sink_vol'] = args[0]
             def get_fsink_vol(*args):
                 self._conn.call_async('org.PulseAudio.Core1',
                         self._fallback_sink, None,
                         'Get', None,
                         ('org.PulseAudio.Core1.Device', 'Volume'),
                         reply_handler=sig_functions['fsink_vol_update'],
+                        error_handler=sig_functions['error_handler'])
+            def set_fsink_vol_up(*args):
+                v = max(self._pa_state['fb_sink_vol']) + 2000
+                v = v if v <= 65536 else 65536
+                self._conn.call_async('org.PulseAudio.Core1',
+                        self._fallback_sink, None,
+                        'Set', None,
+                        ('org.PulseAudio.Core1.Device', 'Volume',
+                            dbus.Array([dbus.UInt32(v)],variant_level=1)),
+                        reply_handler=None,
+                        error_handler=sig_functions['error_handler'])
+            def set_fsink_vol_down(*args):
+                v = max(self._pa_state['fb_sink_vol']) - 2000
+                v = v if v > 0 else 0
+                self._conn.call_async('org.PulseAudio.Core1',
+                        self._fallback_sink, None,
+                        'Set', None,
+                        ('org.PulseAudio.Core1.Device', 'Volume',
+                            dbus.Array([dbus.UInt32(v)],variant_level=1)),
+                        reply_handler=None,
                         error_handler=sig_functions['error_handler'])
             def change_fsink(*args):
                 fsink = args[0]
@@ -88,6 +117,7 @@ class PulseTalker(dbus.service.Object):
                 self._pa_core.Get('org.PulseAudio.Core1', 'FallbackSink',
                         reply_handler=SLfac('', None, ['change_fsink','get_fsink_vol']),
                         error_handler=sig_functions['error_handler'])
+        self.sig_functions = sig_functions
 
         def SLfac(signal_name, obj_path, funcs=[]):
             this = self
@@ -114,7 +144,7 @@ class PulseTalker(dbus.service.Object):
 
         print("PA initialized")
         print(f'Fallback: {self._fallback_sink}')
-        self._awesome.init_paw()
+        self._awesome.init_paw(self)
 
     def _pa_signal_on(self, name, path=None):
         if self._pa_state['pa_signals'].get((name,path), None):
